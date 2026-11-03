@@ -144,8 +144,6 @@ def extract(path, suffix):
                         table_cells += len(values)
                         rows.append(values)
                     tables.append({"name": f"페이지 {index}", "rows": rows})
-                    if len(text) > MAX_TEXT:
-                        partial = True
                     if partial:
                         break
                 if chars > MAX_TEXT:
@@ -155,7 +153,7 @@ def extract(path, suffix):
             details.append(f"PDF {len(document.pages)}페이지. 텍스트 없는 페이지: {blank_pages}.")
             if blank_pages:
                 status = "needs_ocr" if blank_pages == len(document.pages) else "partial"
-                details.append("스캔 영역은 OCR 미구현으로 확인 필요. 기호·회로 연결은 판독하지 않았습니다.")
+                details.append("텍스트 없는 영역은 별도 로컬 OCR 실행 및 원본 대조가 필요합니다. 기호·회로 연결은 판독하지 않았습니다.")
     else:
         signatures = {
             ".png": b"\x89PNG\r\n\x1a\n",
@@ -176,9 +174,11 @@ def extract(path, suffix):
                 details.append(f"이미지 {image.width} × {image.height}px. 파일 구조 확인.")
                 image.verify()
         status = "needs_ocr"
-        details.append("로컬 OCR 미구현·텍스트 미추출. 도면 기호·연결 관계 및 AI 분석은 확인 필요.")
+        details.append("업로드 시 OCR은 실행하지 않습니다. 별도 로컬 OCR 실행 및 원본 대조가 필요합니다. 도면 기호·연결 관계 및 AI 분석은 확인 필요.")
     if not raw:
         raise InvalidFile("빈 파일은 업로드할 수 없습니다.")
+    if len(text) > MAX_TEXT:
+        partial = True
     if partial:
         status = "partial"
         details.append("추출 자원 제한으로 일부만 읽었습니다. 원본은 그대로 보관됩니다.")

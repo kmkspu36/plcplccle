@@ -57,7 +57,9 @@ pydantic==2.14.2
 pydantic-core==2.50.2
     # via pydantic
 pypdfium2==5.14.0
-    # via pdfplumber
+    # via
+    #   -r requirements.txt
+    #   pdfplumber
 starlette==1.10.0
     # via fastapi
 typing-extensions==4.16.0

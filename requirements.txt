@@ -4,4 +4,5 @@ pdfplumber>=0.11.5,<0.12
 openpyxl>=3.1.5,<4
 defusedxml>=0.7.1,<1
 Pillow>=11.1,<13
+pypdfium2>=5.14,<6
 httpx>=0.28.1,<1

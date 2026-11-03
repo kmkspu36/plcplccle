@@ -16,7 +16,8 @@ const pages = [
 ];
 const agents = ["통합 운영", "작화 전문가", "도면 분석", "오류 검사", "오류 수정", "최종 검증", "코드 생성", "보고서"];
 const extractionLabels = { extracted: "텍스트·표 추출 완료", partial: "일부 추출·확인 필요", needs_ocr: "OCR 필요·미추출 영역", failed: "추출 실패" };
-const state = { key: "", status: null, projects: [], projectId: "", files: [], versions: [], history: [], page: "", chat: null, subscription: null, chatTimer: null, previewURL: null, busy: false, pendingRender: false, route: 0 };
+const ocrLabels = { not_run: "OCR 미실행", extracted: "OCR 문자 추출·대조 필요", partial: "OCR 일부 추출·대조 필요", no_text: "OCR 인식 문자 없음", failed: "OCR 실패" };
+const state = { key: "", status: null, projects: [], projectId: "", files: [], versions: [], history: [], page: "", chat: null, subscription: null, chatTimer: null, previewURL: null, document: null, busy: false, pendingRender: false, route: 0 };
 const content = document.querySelector("#content");
 const escapeHTML = value => String(value ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const date = value => new Date(value).toLocaleString("ko-KR");
@@ -104,16 +105,16 @@ function projectsPage() {
 }
 
 function fileRows() {
-  return state.files.length ? `<div class="table-wrap"><table><thead><tr><th>파일</th><th>업로드 / 추출</th><th>AI 전달</th><th>자료 확인</th></tr></thead><tbody>${state.files.map(file => `<tr><td class="file-name">${escapeHTML(file.name)}<div class="subtle">${(file.size / 1024).toFixed(1)} KB · ${escapeHTML(date(file.created_at))}</div></td><td>${badge("원본 보관", "blue")}<p>${badge(extractionLabels[file.extraction_status] ?? file.extraction_status, file.extraction_status === "extracted" ? "blue" : "warn")}</p></td><td>${badge("미연결", "warn")}</td><td><div class="file-actions"><button data-extract="${file.id}">추출 보기</button><button data-download="${file.id}">원본</button>${[".png", ".jpg", ".jpeg"].includes(file.suffix) ? `<button data-preview="${file.id}">미리 보기</button>` : ""}</div></td></tr>`).join("")}</tbody></table></div>` : empty("등록된 파일이 없습니다", "업로드한 자료는 이 PC의 비공개 로컬 폴더에 보관됩니다.");
+  return state.files.length ? `<div class="table-wrap"><table><thead><tr><th>파일</th><th>업로드 / 추출 / OCR</th><th>AI 전달</th><th>자료 확인</th></tr></thead><tbody>${state.files.map(file => `<tr><td class="file-name">${escapeHTML(file.name)}<div class="subtle">${(file.size / 1024).toFixed(1)} KB · ${escapeHTML(date(file.created_at))}</div></td><td>${badge("원본 보관", "blue")}<p>${badge(extractionLabels[file.extraction_status] ?? file.extraction_status, file.extraction_status === "extracted" ? "blue" : "warn")}</p>${[".pdf", ".png", ".jpg", ".jpeg"].includes(file.suffix) ? `<p>${badge(ocrLabels[file.ocr.status], file.ocr.status === "not_run" ? "" : "warn")}${file.ocr.page ? `<span class="subtle"> 최근 ${file.ocr.page}페이지</span>` : ""}</p>` : ""}</td><td>${badge("미연결", "warn")}</td><td><div class="file-actions"><button data-extract="${file.id}">추출 보기</button><button data-download="${file.id}">원본</button>${[".pdf", ".png", ".jpg", ".jpeg"].includes(file.suffix) ? `<button data-preview="${file.id}">미리 보기 / OCR</button>` : ""}</div></td></tr>`).join("")}</tbody></table></div>` : empty("등록된 파일이 없습니다", "업로드한 자료는 이 PC의 비공개 로컬 폴더에 보관됩니다.");
 }
 function drawings() {
-  return `${requireProject()}${info("파일 보관·무료 전처리와 PLC 도면 AI 분석은 서로 다른 단계입니다. OCR 및 AGENT 01 → 03 전달은 미연결 상태입니다.")}
+  return `${requireProject()}${info("파일 보관·무료 추출·로컬 OCR과 PLC 도면 AI 분석은 서로 다른 단계입니다. OCR은 문자만 추출하며 기호·회로 연결은 판독하지 않습니다. AGENT 01 → 03 전달은 미연결입니다.")}
   <div class="grid two-col"><div>
     ${card("도면 및 엔지니어링 자료", `<form id="upload-form" class="card-body"><div class="drop-zone"><strong>분석할 원본 파일을 선택하세요</strong><small>PDF · JPG · JPEG · PNG · XLSX · CSV · TXT</small><input type="file" id="upload-file" aria-label="업로드 파일 선택" accept=".pdf,.jpg,.jpeg,.png,.xlsx,.csv,.txt" required ${!project() ? "disabled" : ""}><small>파일당 15MB · PDF 40페이지 · 전체 보관량 250MB</small></div><div class="actions section-space"><button class="primary" type="submit" ${!project() ? "disabled" : ""}>업로드 및 무료 추출</button><span id="upload-status" class="subtle" role="status">AI 자동 전달 없음</span></div><progress id="upload-progress" hidden aria-label="업로드 및 추출 중"></progress></form>`)}
-    ${card("보관 파일", fileRows(), badge(`${state.files.length}개`))}
+    ${card("보관 파일", `<div id="file-list">${fileRows()}</div>`, badge(`${state.files.length}개`))}
   </div><div>
-    ${card("처리 단계", '<div class="card-body"><div class="check-row"><div>01 · 원본 업로드<small>형식·서명·크기 검사 후 비공개 보관</small></div>' + badge("구현", "blue") + '</div><div class="check-row"><div>02 · 무료 전처리<small>PDF 텍스트·표, Excel, CSV, TXT</small></div>' + badge("구현", "blue") + '</div><div class="check-row"><div>03 · OCR<small>스캔·이미지 텍스트 추출 및 기호 판독</small></div>' + badge("추가 개발", "warn") + '</div><div class="check-row"><div>04 · AI 전달·도면 분석<small>01 → 03 원본·추출 전달 경로 확인 필요</small></div>' + badge("미연결", "warn") + '</div></div>')}
-    ${card("파일 확인", '<div id="file-detail" class="card-body"><p class="subtle">추출 보기 또는 이미지 미리 보기를 선택하세요. PDF 페이지 미리 보기는 미구현이며 원본 다운로드 후 확인할 수 있습니다.</p></div>')}
+    ${card("처리 단계", '<div class="card-body"><div class="check-row"><div>01 · 원본 업로드<small>형식·서명·크기 검사 후 비공개 보관</small></div>' + badge("구현", "blue") + '</div><div class="check-row"><div>02 · 무료 전처리<small>PDF 텍스트·표, Excel, CSV, TXT</small></div>' + badge("구현", "blue") + '</div><div class="check-row"><div>03 · 로컬 OCR<small>선택한 1페이지의 문자만 추출 · 기호 판독 아님</small></div>' + badge(state.status.ocr.status === "configured" ? "설정됨·실행 필요" : "설정 필요", "warn") + '</div><div class="check-row"><div>04 · AI 전달·도면 분석<small>01 → 03 원본·추출 전달 경로 확인 필요</small></div>' + badge("미연결", "warn") + '</div></div>')}
+    ${card("파일 확인", '<div id="file-detail" class="card-body"><p class="subtle">미리 보기 / OCR에서 PDF 페이지를 이동하거나 이미지의 문자를 추출할 수 있습니다. OCR 결과는 원본과 별도 보관하며 실제 실행하지 않은 페이지는 미실행으로 표시합니다.</p></div>')}
   </div></div>`;
 }
 
@@ -160,7 +161,7 @@ function validation() {
 function reports() {
   const p = project();
   return `${requireProject()}${disconnected("08", "AI 보고서 작성과 PDF·Excel 출력은 추가 개발이 필요합니다. 아래에는 실제 로컬 저장 자료만 표시됩니다.")}
-    ${card("프로젝트 자료 현황", `<div class="card-body"><dl class="definition"><dt>프로젝트</dt><dd>${escapeHTML(p?.name ?? "미선택")}</dd><dt>환경</dt><dd>Mitsubishi / ${escapeHTML(p?.gx_works_version ?? "미정")} / CPU ${escapeHTML(p?.cpu_model || "미정")}</dd><dt>보관 자료</dt><dd>${state.files.length}개 · AI 분석 미실행</dd><dt>텍스트 버전</dt><dd>${state.versions.length}개 · 미검사</dd><dt>검사 / 재검사</dt><dd>미수행</dd><dt>실제 검증</dt><dd>컴파일·시뮬레이션·설비 시험 미수행</dd><dt>미확인 사항</dt><dd>에이전트 실행·파일 전달·CPU·GX 연결·OCR 및 도면 의미 판독</dd></dl><h3 class="section-space">저장된 설비 요구사항</h3><pre>${escapeHTML(p?.requirements || "등록된 요구사항 없음")}</pre><div class="actions section-space"><button disabled>AI 보고서 · 미연결</button><button disabled>PDF / Excel 출력 · 미구현</button></div></div>`)}`;
+    ${card("프로젝트 자료 현황", `<div class="card-body"><dl class="definition"><dt>프로젝트</dt><dd>${escapeHTML(p?.name ?? "미선택")}</dd><dt>환경</dt><dd>Mitsubishi / ${escapeHTML(p?.gx_works_version ?? "미정")} / CPU ${escapeHTML(p?.cpu_model || "미정")}</dd><dt>보관 자료</dt><dd>${state.files.length}개 · AI 분석 미실행</dd><dt>텍스트 버전</dt><dd>${state.versions.length}개 · 미검사</dd><dt>검사 / 재검사</dt><dd>미수행</dd><dt>실제 검증</dt><dd>컴파일·시뮬레이션·설비 시험 미수행</dd><dt>미확인 사항</dt><dd>에이전트 실행·파일 전달·CPU·GX 연결·OCR 문자 원본 대조 및 도면 의미 판독</dd></dl><h3 class="section-space">저장된 설비 요구사항</h3><pre>${escapeHTML(p?.requirements || "등록된 요구사항 없음")}</pre><div class="actions section-space"><button disabled>AI 보고서 ·미연결</button><button disabled>PDF / Excel 출력 · 미구현</button></div></div>`)}`;
 }
 function studio() {
   const ready = state.status.broker_enabled && state.status.broker_configured;
@@ -175,8 +176,8 @@ function studio() {
 function settings() {
   return `${info("<strong>공개 배포 금지 · 로컬 단일사용 개발 범위</strong><p>로컬 세션 보호와 프로젝트별 자료 경로 검사는 구현되어 있으나 로그인·다중 사용자 소유권·조직 권한·운영 감사·백업/삭제 정책은 완성되지 않았습니다. 이 PC의 다른 프로세스와 사용자를 격리하는 보안 경계가 아닙니다.</p>", "warning")}
   <div class="grid equal-col">${card("연결 설정 · 읽기 전용", `<div class="card-body"><dl class="definition"><dt>Web Chat</dt><dd>4.18.0 · 연결 시 CDN 로드</dd><dt>브로커 호출</dt><dd>${badge(state.status.broker_enabled ? "명시적 활성화" : "비활성", "warn")}</dd><dt>서버 비밀값</dt><dd>${badge(state.status.broker_configured ? "설정됨 · 값 비공개" : "설정 필요", "warn")}</dd><dt>실제 연결</dt><dd>미확인 · 작업실에서 명시적 연결 필요</dd><dt>기본 대상</dt><dd>AGENT 01 · 브로커 대상 확인 필요</dd><dt>전문 호출</dt><dd>기존 Studio 연결·권한·게시 상태 확인 필요</dd><dt>파일 전달</dt><dd>Direct Line 원본 / 추출 텍스트 경로 미확인</dd></dl><p class="subtle section-space">비밀값은 UI에 입력하거나 저장하지 않습니다. 서버 환경변수로만 관리하세요. 기존 브로커·에이전트 설정 및 지침은 변경하지 않았습니다.</p></div>`)}
-  ${card("파일 처리 및 제한", `<div class="card-body"><dl class="definition"><dt>보관</dt><dd>서버 비공개 디렉터리 · SQLite 메타데이터</dd><dt>지원</dt><dd>PDF/JPG/JPEG/PNG/XLSX/CSV/TXT</dd><dt>한도</dt><dd>파일 15MB / PDF 40페이지 / 이미지 2천만 픽셀</dd><dt>로컬 한도</dt><dd>프로젝트 50 / 파일 100 / 원본 총 250MB</dd><dt>추출</dt><dd>별도 프로세스 · 25초 · 텍스트 150,000자 · 표 10,000셀</dd><dt>OCR</dt><dd>미구현 · 외부 이미지 AI 사용 없음</dd><dt>Excel</dt><dd>무료 openpyxl 추출 · 수식 실행 안 함 · 직접 AI 전달 미지원</dd></dl><p class="subtle section-space">추출은 PLC 판단 AI가 아닙니다. 손상/암호화 문서·과도한 압축률·매크로/외부 연결 XLSX를 거부합니다. 바이러스 검사 및 Windows OS 수준 파서 샌드박스는 미구현입니다.</p></div>`)}</div>
-  ${card("구현과 후속 연결 구분", '<div class="card-body"><details open><summary>이번 기반에서 제공하는 기능</summary><p>12개 화면 탐색, 프로젝트·요구사항 저장, 원본 파일 보관 및 무료 추출, 텍스트 버전 저장·비교·승인, 실제 작업 이력, 명시적 설정 기반 기존 토큰 중계와 Web Chat 연결 코드.</p></details><details><summary>실제 환경 확인이 필요한 항목</summary><p>AGENT 01 대상·실제 응답, 02~08 호출과 입출력, 업로드 활성화, Web Chat 4.18.0 첨부 호환, 01에서03 원본 전달 및 추출 텍스트 매핑.</p></details><details><summary>추가 개발 / 초기 범위 밖</summary><p>OCR, 래더 렌더러, GX 네이티브 파일·실제 컴파일·시뮬레이션, AI 결과 구조화, 보고서 출력, 다중 사용자 인증. PLC 다운로드 및 설비 자동제어는 초기 범위 밖입니다.</p></details></div>')}`;
+  ${card("파일 처리 및 제한", `<div class="card-body"><dl class="definition"><dt>보관</dt><dd>서버 비공개 디렉터리 · SQLite 메타데이터</dd><dt>지원</dt><dd>PDF/JPG/JPEG/PNG/XLSX/CSV/TXT</dd><dt>한도</dt><dd>파일 15MB / PDF 40페이지 / 이미지 2천만 픽셀</dd><dt>로컬 한도</dt><dd>프로젝트 50 / 파일 100 / 원본 총 250MB / OCR 500회</dd><dt>추출</dt><dd>별도 프로세스 · 25초 · 텍스트 150,000자 · 표 10,000셀</dd><dt>페이지 미리 보기</dt><dd>PDF·이미지 PNG 렌더링 · 최대 긴 변 1,600px</dd><dt>로컬 OCR</dt><dd>${escapeHTML(state.status.ocr.reason)}<p class="subtle">Tesseract · 한국어+영어 · 페이지별 실행 · 외부 전송 없음 · 최대 32초</p></dd><dt>Excel</dt><dd>무료 openpyxl 추출 · 수식 실행 안 함 · 직접 AI 전달 미지원</dd></dl><p class="subtle section-space">추출은 PLC 판단 AI가 아닙니다. 손상/암호화 문서·과도한 압축률·매크로/외부 연결 XLSX를 거부합니다. 바이러스 검사 및 Windows OS 수준 파서 샌드박스는 미구현입니다.</p></div>`)}</div>
+  ${card("구현과 후속 연결 구분", '<div class="card-body"><details open><summary>이번 기반에서 제공하는 기능</summary><p>12개 화면 탐색, 프로젝트·요구사항 저장, 원본 파일 보관 및 무료 추출, PDF 페이지 미리 보기, 선택 페이지의 무료 로컬 OCR, 텍스트 버전 저장·비교·승인, 실제 작업 이력, 명시적 설정 기반 기존 토큰 중계와 Web Chat 연결 코드.</p></details><details><summary>실제 환경 확인이 필요한 항목</summary><p>AGENT 01 대상·실제 응답, 02~08 호출과 입출력, 업로드 활성화, Web Chat 4.18.0 첨부 호환, 01에서03 원본 전달 및 추출 텍스트 매핑. OCR 문자는 항상 원본과 대조해야 합니다.</p></details><details><summary>추가 개발 / 초기 범위 밖</summary><p>도면 기호·회로 연결 판독, 래더 렌더러, GX 네이티브 파일·실제 컴파일·시뮬레이션, AI 결과 구조화, 보고서 출력, 다중 사용자 인증. PLC 다운로드 및 설비 자동제어는 초기 범위 밖입니다.</p></details></div>')}`;
 }
 
 function stopChat() {
@@ -194,6 +195,7 @@ async function render() {
   const page = pages.find(p => p[0] === id) ?? pages[0];
   stopChat();
   if (state.previewURL) { URL.revokeObjectURL(state.previewURL); state.previewURL = null; }
+  state.document = null;
   state.page = page[0];
   document.querySelector("#sidebar").classList.remove("open");
   document.querySelector("#menu-toggle").setAttribute("aria-expanded", "false");
@@ -326,6 +328,43 @@ async function uploadFile(event) {
   });
 }
 
+async function showDocument(file, pageNumber = 1) {
+  const response = await api(projectPath(`/files/${file.id}/preview?page=${pageNumber}`));
+  const count = Number(response.headers.get("X-Page-Count"));
+  const blob = await response.blob();
+  const history = await json(projectPath(`/files/${file.id}/ocr?page=${pageNumber}`));
+  if (state.previewURL) URL.revokeObjectURL(state.previewURL);
+  state.previewURL = URL.createObjectURL(blob);
+  state.document = { file, page: pageNumber, count };
+  const result = history[0];
+  const configured = state.status.ocr.status === "configured";
+  document.querySelector("#file-detail").innerHTML = `<h3>${escapeHTML(file.name)}</h3>
+    <div class="preview-controls actions"><button data-document-page="${pageNumber - 1}" ${pageNumber <= 1 ? "disabled" : ""} aria-label="이전 페이지">← 이전</button>
+    <label for="document-page">페이지 <select id="document-page" aria-label="페이지 선택">${Array.from({ length: count }, (_, i) => `<option value="${i + 1}" ${i + 1 === pageNumber ? "selected" : ""}>${i + 1} / ${count}</option>`).join("")}</select></label>
+    <button data-document-page="${pageNumber + 1}" ${pageNumber >= count ? "disabled" : ""} aria-label="다음 페이지">다음 →</button></div>
+    <img class="preview-image section-space" alt="${escapeHTML(file.name)} ${pageNumber}페이지 미리 보기">
+    <p class="subtle">서버에서 제한 해상도로 렌더링한 미리 보기입니다. 원본 파일은 변경하지 않습니다.</p>
+    <div class="info warning">로컬 OCR은 글자만 추출합니다. 오인식·누락이 있으며 회로 기호·배선 연결·PLC 안전성은 검증하지 않습니다. 원본 대조가 필요합니다.</div>
+    ${!configured ? `<p class="subtle">${escapeHTML(state.status.ocr.reason)} <a href="#settings">설정 확인 →</a></p>` : ""}
+    <button id="run-local-ocr" class="primary" data-run-ocr="true" ${!configured ? "disabled" : ""}>현재 페이지 로컬 OCR ${result ? "재실행" : "실행"}</button>
+    <p id="ocr-progress" class="subtle" role="status">외부 전송 없음 · 선택한 ${pageNumber}페이지에만 적용</p>
+    <h3 class="section-space">선택 페이지 OCR 결과</h3>
+    ${result ? `<p>${badge(ocrLabels[result.status], "warn")}</p>${result.details.map(d => `<p class="subtle">${escapeHTML(d)}</p>`).join("")}<pre id="ocr-text">${escapeHTML(result.text || "인식된 문자 없음")}</pre><p class="subtle">${escapeHTML(date(result.created_at))} · AI 전달 미연결</p>
+    <details><summary>이 페이지의 최근 실행 기록 (${history.length}건, 최대 5건)</summary>${history.map(item => `<div class="history-item"><strong>${escapeHTML(ocrLabels[item.status])}</strong><small>${escapeHTML(date(item.created_at))}</small><pre>${escapeHTML(item.text || item.details.join("\n"))}</pre></div>`).join("")}</details>` : '<p class="subtle">이 페이지는 OCR 미실행 상태입니다. 업로드만으로 OCR·AI 분석이 완료되지 않습니다.</p>'}`;
+  document.querySelector("#file-detail .preview-image").src = state.previewURL;
+}
+
+content.addEventListener("change", event => {
+  if (event.target.id !== "document-page" || !state.document) return;
+  const selected = Number(event.target.value);
+  const previous = state.document.page;
+  if (state.busy) { event.target.value = previous; return; }
+  action(event.target, async () => {
+    try { await showDocument(state.document.file, selected); }
+    catch (error) { event.target.value = previous; throw error; }
+  });
+});
+
 content.addEventListener("click", async event => {
   const button = event.target.closest("button");
   if (!button || state.busy) return;
@@ -334,26 +373,43 @@ content.addEventListener("click", async event => {
   if (button.dataset.version) {
     document.querySelector("#version-detail").textContent = state.versions.find(v => v.id === button.dataset.version)?.text ?? "";
   }
+  if (button.dataset.documentPage && state.document) {
+    await action(button, () => showDocument(state.document.file, Number(button.dataset.documentPage)));
+    return;
+  }
+  if (button.dataset.runOcr && state.document) {
+    await action(button, async () => {
+      const { file, page } = state.document;
+      document.querySelector("#ocr-progress").textContent = "로컬 OCR 실행 중 … 아직 완료되지 않았습니다.";
+      let failure;
+      try {
+        await json(projectPath(`/files/${file.id}/ocr?page=${page}`), { method: "POST" });
+      } catch (error) { failure = error; }
+      state.files = await json(projectPath("/files"));
+      document.querySelector("#file-list").innerHTML = fileRows();
+      await showDocument(file, page);
+      if (failure) throw failure;
+      notify("선택 페이지 OCR 실행을 마쳤습니다. 문자 결과를 원본과 대조하세요. AI 전달 미연결.");
+    });
+    return;
+  }
   const id = button.dataset.extract || button.dataset.download || button.dataset.preview;
   if (!id) return;
   await action(button, async () => {
     const file = state.files.find(f => f.id === id);
     if (button.dataset.extract) {
       const result = await json(projectPath(`/files/${id}/extraction`));
+      state.document = null;
+      if (state.previewURL) { URL.revokeObjectURL(state.previewURL); state.previewURL = null; }
       document.querySelector("#file-detail").innerHTML = `<h3>${escapeHTML(file.name)}</h3><p>${badge(extractionLabels[result.status], "blue")}</p>${result.details.map(d => `<p class="subtle">${escapeHTML(d)}</p>`).join("")}<pre>${escapeHTML(result.text || "추출 텍스트 없음")}</pre>${result.tables.map(t => `<details><summary>${escapeHTML(t.name)} · ${t.rows.length}행</summary><div class="table-wrap"><table><tbody>${t.rows.map(row => `<tr>${row.map(cell => `<td>${escapeHTML(cell)}</td>`).join("")}</tr>`).join("")}</tbody></table></div></details>`).join("")}<p class="subtle">AI 전달 미연결 · PLC 의미 분석 미수행</p>`;
+    } else if (button.dataset.preview) {
+      await showDocument(file);
     } else {
       const blob = await (await api(projectPath(`/files/${id}/original`))).blob();
-      if (button.dataset.preview) {
-        if (state.previewURL) URL.revokeObjectURL(state.previewURL);
-        state.previewURL = URL.createObjectURL(new Blob([blob], { type: file.suffix === ".png" ? "image/png" : "image/jpeg" }));
-        document.querySelector("#file-detail").innerHTML = `<h3>${escapeHTML(file.name)}</h3><img class="preview-image" alt="업로드 원본 이미지: ${escapeHTML(file.name)}"><p class="subtle">원본 미리 보기 · AI 분석 및 OCR 미수행</p>`;
-        document.querySelector(".preview-image").src = state.previewURL;
-      } else {
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement("a");
-        link.href = url; link.download = file.name; link.click();
-        setTimeout(() => URL.revokeObjectURL(url), 1000);
-      }
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url; link.download = file.name; link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
     }
   });
 });

@@ -9,9 +9,11 @@ import time
 import urllib.request
 from pathlib import Path
 
-from playwright.sync_api import expect, sync_playwright
-
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from playwright.sync_api import expect, sync_playwright
+from test_documents import image_bytes, scan_pdf, text_image
 PAGES = [
     ("dashboard", "대시보드"), ("studio", "AI 엔지니어링 작업실"),
     ("drawings", "PLC 도면 분석"), ("ladder", "PLC 작화 작성"),
@@ -123,6 +125,63 @@ def run_browser(base, directory):
         expect(page.locator("#notice")).to_contain_text("PDF 시그니처")
         assert page.locator(".file-name").count() == 1
         print("PASS: browser project persistence, real upload/extraction/download byte preservation, invalid file failure.")
+
+        pdf_payload = scan_pdf()
+        page.locator("#upload-file").set_input_files({"name": "pages.pdf", "mimeType": "application/pdf", "buffer": pdf_payload})
+        page.get_by_role("button", name="업로드 및 무료 추출", exact=True).click()
+        pdf_row = page.locator("tr").filter(has_text="pages.pdf")
+        expect(pdf_row).to_be_visible()
+        pdf_row.get_by_role("button", name="미리 보기 / OCR", exact=True).click()
+        expect(page.locator("#document-page")).to_have_value("1")
+        expect(page.get_by_role("button", name="이전 페이지", exact=True)).to_be_disabled()
+        expect(page.locator("#file-detail")).to_contain_text("이 페이지는 OCR 미실행")
+        page.get_by_role("button", name="다음 페이지", exact=True).click()
+        expect(page.locator("#document-page")).to_have_value("2")
+        expect(page.get_by_role("button", name="다음 페이지", exact=True)).to_be_disabled()
+        expect(page.locator("#file-detail .preview-image")).to_be_visible()
+        assert page.locator("#file-detail .preview-image").evaluate("(img) => img.complete && img.naturalWidth > 0")
+        if page.locator("#run-local-ocr").is_enabled():
+            page.locator("#run-local-ocr").click()
+            expect(page.locator("#ocr-text")).to_contain_text("OUTPUT", timeout=25000)
+            recognized = page.locator("#ocr-text").inner_text()
+            page.locator("#document-page").select_option("1")
+            expect(page.locator("#file-detail")).to_contain_text("이 페이지는 OCR 미실행")
+            page.locator("#document-page").select_option("2")
+            expect(page.locator("#ocr-text")).to_have_text(recognized)
+            with page.expect_download() as downloaded:
+                page.locator("tr").filter(has_text="pages.pdf").get_by_role("button", name="원본", exact=True).click()
+            assert Path(downloaded.value.path()).read_bytes() == pdf_payload
+            print("PASS: real PDF preview/navigation, selected-page local OCR, persisted result and immutable original.")
+        else:
+            print("PASS: PDF preview/navigation; optional OCR is disabled with setup guidance (engine/languages missing).")
+        screenshots = os.environ.get("PLC_TEST_SCREENSHOTS")
+        if screenshots:
+            page.evaluate("window.scrollTo(0, 0)")
+            page.screenshot(path=str(Path(screenshots) / "ocr-pdf-desktop.png"), full_page=True)
+        page.set_viewport_size({"width": 390, "height": 844})
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+        expect(page.locator("#document-page")).to_be_visible()
+        if screenshots:
+            page.evaluate("window.scrollTo(0, 0)")
+            page.screenshot(path=str(Path(screenshots) / "ocr-pdf-mobile.png"), full_page=True)
+        page.set_viewport_size({"width": 1440, "height": 1000})
+
+        image = text_image()
+        try:
+            png = image_bytes(image)
+        finally:
+            image.close()
+        page.locator("#upload-file").set_input_files({"name": "input.png", "mimeType": "image/png", "buffer": png})
+        page.get_by_role("button", name="업로드 및 무료 추출", exact=True).click()
+        image_row = page.locator("tr").filter(has_text="input.png")
+        image_row.get_by_role("button", name="미리 보기 / OCR", exact=True).click()
+        expect(page.locator("#document-page")).to_have_value("1")
+        expect(page.get_by_role("button", name="다음 페이지", exact=True)).to_be_disabled()
+        if page.locator("#run-local-ocr").is_enabled():
+            page.locator("#run-local-ocr").click()
+            expect(page.locator("#ocr-text")).to_contain_text("INPUT", timeout=25000)
+            expect(page.locator("#file-detail")).to_contain_text("오인식·누락")
+            print("PASS: real local image OCR through browser controls.")
 
         navigate("code", "PLC 코드 생성")
         original = "LD X000\nOUT Y000"

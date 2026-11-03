@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import hashlib
 import hmac
 import http.client
@@ -17,10 +18,12 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import unquote
 
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+
+from app.document_tasks import ocr_configuration
 
 ROOT = Path(__file__).resolve().parent.parent
 MAX_UPLOAD = 15 * 1024**2
@@ -54,7 +57,7 @@ def create_app(data_dir=None):
         raise RuntimeError("PLC_DATA_DIR must be a dedicated private directory, not the web or repository root.")
     lock = threading.Lock()
     session_key = secrets.token_urlsafe(32)
-    uploads = asyncio.Semaphore(1)
+    processing = asyncio.Semaphore(1)
     broker_lock = asyncio.Lock()
     last_broker = 0.0
 
@@ -97,6 +100,9 @@ def create_app(data_dir=None):
                 CREATE TABLE IF NOT EXISTS events (
                     id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
                     action TEXT NOT NULL, detail TEXT NOT NULL, created_at TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS ocr_results (
+                    id TEXT PRIMARY KEY, file_id TEXT NOT NULL REFERENCES files(id),
+                    page INTEGER NOT NULL, result TEXT NOT NULL, created_at TEXT NOT NULL);
             """)
         yield
 
@@ -152,7 +158,7 @@ def create_app(data_dir=None):
             "scope": "local-single-user", "public_deployment_allowed": False,
             "broker_enabled": enabled, "broker_configured": sealed,
             "agent_connection": "unverified", "agent_routing": "unverified",
-            "file_delivery": "unverified", "ocr": "not_implemented",
+            "file_delivery": "unverified", "ocr": ocr_configuration(),
             "webchat_version": "4.18.0", "max_upload_bytes": MAX_UPLOAD,
             "max_pdf_pages": 40,
         }
@@ -200,6 +206,10 @@ def create_app(data_dir=None):
                 extraction = json.loads(item.pop("extraction"))
                 item.update(upload_status="stored", extraction_status=extraction["status"],
                             ai_delivery_status="disconnected", details=extraction["details"])
+                latest = connection.execute(
+                    "SELECT page, json_extract(result, '$.status') AS status FROM ocr_results "
+                    "WHERE file_id=? ORDER BY created_at DESC LIMIT 1", (item["id"],)).fetchone()
+                item["ocr"] = dict(latest) if latest else {"status": "not_run", "page": None}
                 result.append(item)
             return result
 
@@ -236,9 +246,9 @@ def create_app(data_dir=None):
             raise HTTPException(415, "PDF, JPG, JPEG, PNG, XLSX, CSV, TXT만 지원합니다.")
         if request.headers.get("content-type", "").split(";")[0] != "application/octet-stream":
             raise HTTPException(415, "application/octet-stream 원본 파일 본문이 필요합니다.")
-        if uploads.locked():
+        if processing.locked():
             raise HTTPException(429, "다른 파일을 처리 중입니다. 완료 후 다시 시도하세요.")
-        async with uploads:
+        async with processing:
             with database() as connection:
                 project_exists(connection, project_id)
                 total, count = connection.execute("SELECT COALESCE(SUM(size),0), COUNT(*) FROM files").fetchone()
@@ -284,6 +294,98 @@ def create_app(data_dir=None):
         if not row:
             raise HTTPException(404, "이 프로젝트의 파일을 찾을 수 없습니다.")
         return row
+
+    def document_file(project_id, file_id):
+        with database() as connection:
+            row = owned_file(connection, project_id, file_id)
+        if row["suffix"] not in (".pdf", ".jpg", ".jpeg", ".png"):
+            raise HTTPException(415, "PDF 또는 PNG/JPG/JPEG 파일만 지원합니다.")
+        path = storage / "files" / (row["id"] + row["suffix"])
+        if not path.is_file():
+            raise HTTPException(410, "원본이 디스크에 없습니다. 로컬 보관 폴더를 확인하세요.")
+        return path
+
+    def document_task(mode, path, page):
+        try:
+            process = subprocess.run(
+                [sys.executable, "-m", "app.document_tasks", mode, str(path), str(page)],
+                cwd=ROOT, capture_output=True, timeout=32, check=False,
+                env={key: value for key, value in os.environ.items()
+                     if key not in ("PLC_BROKER_SEALED", "PLC_ENABLE_BROKER")},
+            )
+        except subprocess.TimeoutExpired:
+            raise HTTPException(422, "문서 처리 제한 시간(32초)을 초과했습니다. 원본은 변경되지 않았습니다.")
+        if process.returncode != 0 or len(process.stdout) > 9 * 1024**2:
+            raise HTTPException(422, "문서 처리 자원 제한 또는 엔진 실행 오류입니다.")
+        try:
+            result = json.loads(process.stdout)
+        except (ValueError, UnicodeDecodeError):
+            raise HTTPException(422, "문서 처리 응답이 올바르지 않습니다.")
+        if not result.get("ok"):
+            raise HTTPException(result.get("code", 422), result.get("error", "문서 처리 실패"))
+        return result
+
+    @app.get("/api/projects/{project_id}/files/{file_id}/document")
+    async def document_metadata(project_id: str, file_id: str):
+        path = document_file(project_id, file_id)
+        if processing.locked():
+            raise HTTPException(429, "다른 파일을 처리 중입니다. 완료 후 다시 시도하세요.")
+        async with processing:
+            return await asyncio.to_thread(document_task, "metadata", path, 1)
+
+    @app.get("/api/projects/{project_id}/files/{file_id}/preview")
+    async def preview(project_id: str, file_id: str, page: int = Query(default=1, ge=1, le=40)):
+        path = document_file(project_id, file_id)
+        if processing.locked():
+            raise HTTPException(429, "다른 파일을 처리 중입니다. 완료 후 다시 시도하세요.")
+        async with processing:
+            result = await asyncio.to_thread(document_task, "preview", path, page)
+        return Response(base64.b64decode(result["image"], validate=True), media_type="image/png",
+                        headers={"X-Page-Count": str(result["page_count"]), "X-Preview-Page": str(page)})
+
+    @app.get("/api/projects/{project_id}/files/{file_id}/ocr")
+    def ocr_history(project_id: str, file_id: str, page: int = Query(default=1, ge=1, le=40)):
+        with database() as connection:
+            owned_file(connection, project_id, file_id)
+            rows = connection.execute(
+                "SELECT * FROM ocr_results WHERE file_id=? AND page=? ORDER BY created_at DESC LIMIT 5",
+                (file_id, page))
+            return [dict(json.loads(row["result"]), id=row["id"], page=row["page"],
+                         created_at=row["created_at"]) for row in rows]
+
+    @app.post("/api/projects/{project_id}/files/{file_id}/ocr", status_code=201)
+    async def run_ocr(project_id: str, file_id: str, page: int = Query(default=1, ge=1, le=40)):
+        path = document_file(project_id, file_id)
+        config = ocr_configuration()
+        if config["status"] != "configured":
+            raise HTTPException(503, config["reason"])
+        if processing.locked():
+            raise HTTPException(429, "다른 파일을 처리 중입니다. 완료 후 다시 시도하세요.")
+        async with processing:
+            with database() as connection:
+                if connection.execute("SELECT COUNT(*) FROM ocr_results").fetchone()[0] >= 500:
+                    raise HTTPException(409, "로컬 OCR 실행 보관 한도(500회)에 도달했습니다.")
+            error = None
+            try:
+                result = await asyncio.to_thread(document_task, "ocr", path, page)
+            except HTTPException as failure:
+                if failure.status_code == 404:
+                    raise
+                error = failure
+                result = {"status": "failed", "text": "", "details": [str(failure.detail)]}
+            result.update(id=str(uuid.uuid4()), page=page, created_at=now(),
+                          ai_delivery_status="disconnected")
+            with database() as connection:
+                connection.execute("INSERT INTO ocr_results VALUES (?,?,?,?,?)",
+                                   (result["id"], file_id, page, json.dumps(result, ensure_ascii=True),
+                                    result["created_at"]))
+                label = {"extracted": "문자 추출·원본 대조 필요", "partial": "일부 문자 추출·원본 대조 필요",
+                         "no_text": "인식 문자 없음", "failed": "실패"}[result["status"]]
+                event(connection, project_id, "local_ocr",
+                      f"로컬 OCR · {page}페이지 · {label} · AI 전달 미연결")
+            if error:
+                raise error
+            return result
 
     @app.get("/api/projects/{project_id}/files/{file_id}/extraction")
     def extraction(project_id: str, file_id: str):
